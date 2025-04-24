@@ -1013,7 +1013,7 @@ XML;
     protected function get_initialised_return_array() {
         $ret = array();
         $ret['dynload'] = true;
-        $ret['nosearch'] = true;
+        $ret['nosearch'] = false;
         $ret['nologin'] = false;
         $ret['path'] = [
             [
@@ -1028,5 +1028,269 @@ XML;
         $ret['filereferencewarning'] = get_string('externalpubliclinkwarning', 'repository_nextcloud');
 
         return $ret;
+    }
+
+    /**
+     * Test search functionality with various inputs using the WebDAV search endpoint.
+     *
+     * @dataProvider search_provider
+     * @param string $searchtext The text to search for
+     * @param array|bool $mockresponse The mock response from the webdav search method
+     * @param array $expectedlist The expected result list
+     * @covers ::search
+     */
+    public function test_search($searchtext, $mockresponse, $expectedlist): void {
+        $expected = $this->get_initialised_return_array();
+        $expected['list'] = $expectedlist;
+
+        $this->resetAfterTest(true);
+        $this->setUser();
+
+        // Create mock WebDAV client.
+        $mock = $this->createMock(\webdav_client::class);
+        $mock->expects($this->once())
+            ->method('open')
+            ->willReturn(true);
+
+        // Mock userinfo for proper search path construction.
+        $mockoauth = $this->createMock(\core\oauth2\client::class);
+        $mockoauth->expects($this->any())
+            ->method('get_userinfo')
+            ->willReturn(['username' => 'testuser']);
+        $this->set_private_property($mockoauth, 'client');
+
+        // Setup search method to return the test response.
+        $mock->expects($this->once())
+            ->method('search')
+            ->with('/remote.php/dav/', 'testuser', $searchtext)
+            ->willReturn($mockresponse);
+
+        $mock->expects($this->once())
+            ->method('close');
+
+        $this->set_private_property($mock, 'dav');
+
+        $result = $this->repo->search($searchtext);
+
+        // Remove dynamic values for comparison.
+        if (isset($result['list'])) {
+            foreach ($result['list'] as &$item) {
+                if (isset($item['thumbnail'])) {
+                    $item['thumbnail'] = null;
+                }
+            }
+        }
+
+        $this->assertEquals($expected, $result);
+    }
+
+    /**
+     * Test search error handling
+     * @covers ::search
+     */
+    public function test_search_errors(): void {
+        $this->resetAfterTest(true);
+        $this->setUser();
+
+        // Test empty search string.
+        $result = $this->repo->search('');
+        $this->assertEquals([], $result);
+
+        // Test when WebDAV connection fails.
+        $mock = $this->createMock(\webdav_client::class);
+        $mock->expects($this->once())
+            ->method('open')
+            ->willReturn(false);
+
+        $this->set_private_property($mock, 'dav');
+
+        $result = $this->repo->search('test');
+        $expected = $this->get_initialised_return_array();
+        $this->assertEquals($expected, $result);
+    }
+
+    /**
+     * Test search error handling with more detailed scenarios
+     * @covers ::search
+     */
+    public function test_search_errors_extended(): void {
+        $this->resetAfterTest(true);
+        $this->setUser();
+
+        // Test case 1: Test search with malformed response.
+        $mock = $this->createMock(\webdav_client::class);
+        $mock->expects($this->once())
+            ->method('open')
+            ->willReturn(true);
+
+        // Mock userinfo for proper search path construction.
+        $mockoauth = $this->createMock(\core\oauth2\client::class);
+        $mockoauth->expects($this->any())
+            ->method('get_userinfo')
+            ->willReturn(['username' => 'testuser']);
+        $this->set_private_property($mockoauth, 'client');
+
+        // Return malformed response (string instead of array).
+        $mock->expects($this->once())
+            ->method('search')
+            ->with('/remote.php/dav/', 'testuser', 'test')
+            ->willReturn('invalid response');
+
+        $mock->expects($this->once())
+            ->method('close');
+
+        $this->set_private_property($mock, 'dav');
+
+        $result = $this->repo->search('test');
+        $expected = $this->get_initialised_return_array();
+        $this->assertEquals($expected, $result);
+
+        // Test case 2: Test search with empty username.
+        $mock = $this->createMock(\webdav_client::class);
+        $mock->expects($this->once())
+            ->method('open')
+            ->willReturn(true);
+
+        // Mock userinfo with empty username.
+        $mockoauth = $this->createMock(\core\oauth2\client::class);
+        $mockoauth->expects($this->any())
+            ->method('get_userinfo')
+            ->willReturn(['username' => '']);
+        $this->set_private_property($mockoauth, 'client');
+
+        $mock->expects($this->never())
+            ->method('search');
+
+        $mock->expects($this->once())
+            ->method('close');
+
+        $this->set_private_property($mock, 'dav');
+
+        $result = $this->repo->search('test');
+        $this->assertEquals($expected, $result);
+
+        // Test case 3: Test search with null OAuth client.
+        $this->set_private_property(null, 'client');
+        $result = $this->repo->search('test');
+
+        // Test case 4: Test with very long search string (potential edge case).
+        $mock = $this->createMock(\webdav_client::class);
+        $mock->expects($this->once())
+            ->method('open')
+            ->willReturn(true);
+
+        // Mock userinfo.
+        $mockoauth = $this->createMock(\core\oauth2\client::class);
+        $mockoauth->expects($this->any())
+            ->method('get_userinfo')
+            ->willReturn(['username' => 'testuser']);
+        $this->set_private_property($mockoauth, 'client');
+
+        // Long search string.
+        $longsearchstring = str_repeat('a', 1000);
+
+        $mock->expects($this->once())
+            ->method('search')
+            ->with('/remote.php/dav/', 'testuser', $longsearchstring)
+            ->willReturn([]);
+
+        $mock->expects($this->once())
+            ->method('close');
+
+        $this->set_private_property($mock, 'dav');
+
+        $result = $this->repo->search($longsearchstring);
+        $expected = $this->get_initialised_return_array();
+        $this->assertEquals($expected, $result);
+    }
+
+    /**
+     * Data provider for search tests
+     *
+     * @return array
+     */
+    public static function search_provider(): array {
+        return [
+            'basic search' => [
+                'searchtext' => 'test',
+                'mockresponse' => [
+                    [
+                        'href' => '/remote.php/dav/files/testuser/test.txt',
+                        'lastmodified' => 'Tue, 04 Mar 2025 11:35:29 GMT',
+                        'status' => 'HTTP/1.1 200 OK',
+                        'getcontentlength' => '123',
+                        'resourcetype' => '',
+                    ],
+                ],
+                'expectedlist' => [
+                    'TEST.TXT' => [
+                        'title' => 'test.txt',
+                        'size' => '123',
+                        'source' => '/test.txt',
+                        'thumbnail' => null,
+                        'datemodified' => 1741088129,
+                    ],
+                ],
+            ],
+            'empty search results' => [
+                'searchtext' => 'notfound',
+                'mockresponse' => [],
+                'expectedlist' => [],
+            ],
+            'folder and file results' => [
+                'searchtext' => 'report',
+                'mockresponse' => [
+                    [
+                        'href' => '/remote.php/dav/files/testuser/Reports/',
+                        'lastmodified' => 'Tue, 04 Mar 2025 11:35:29 GMT',
+                        'status' => 'HTTP/1.1 200 OK',
+                        'getcontentlength' => '',
+                        'resourcetype' => 'collection',
+                    ],
+                    [
+                        'href' => '/remote.php/dav/files/testuser/Reports/report-summary.txt',
+                        'lastmodified' => 'Tue, 04 Mar 2025 11:35:29 GMT',
+                        'status' => 'HTTP/1.1 200 OK',
+                        'getcontentlength' => '200',
+                        'resourcetype' => '',
+                    ],
+                    [
+                        'href' => '/remote.php/dav/files/testuser/report-2023.pdf',
+                        'lastmodified' => 'Tue, 04 Mar 2025 11:35:29 GMT',
+                        'status' => 'HTTP/1.1 200 OK',
+                        'getcontentlength' => '1024',
+                        'resourcetype' => '',
+                    ],
+                ],
+                'expectedlist' => [
+                    'REPORTS/' => [
+                        'title' => 'Reports',
+                        'children' => [],
+                        'path' => '/Reports/',
+                        'thumbnail' => null,
+                        'datemodified' => 1741088129,
+                    ],
+                    'REPORTS/REPORT-SUMMARY.TXT' => [
+                        'title' => 'Reports/report-summary.txt',
+                        'size' => '200',
+                        'source' => '/Reports/report-summary.txt',
+                        'thumbnail' => null,
+                        'datemodified' => 1741088129,
+                    ],
+                    'REPORT-2023.PDF' => [
+                        'title' => 'report-2023.pdf',
+                        'size' => '1024',
+                        'source' => '/report-2023.pdf',
+                        'thumbnail' => null,
+                        'datemodified' => 1741088129,
+                    ],
+                ],
+            ],
+            'failed search' => [
+                'searchtext' => 'error',
+                'mockresponse' => false,
+                'expectedlist' => [],
+            ],
+        ];
     }
 }

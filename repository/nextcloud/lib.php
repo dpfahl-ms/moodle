@@ -622,6 +622,52 @@ class repository_nextcloud extends repository {
     }
 
     /**
+     * Search for files in the Nextcloud repository
+     *
+     * @param string $searchtext The text to search for
+     * @param int $page Page number of results to fetch (Not used)
+     * @return array An array with format matching repository::get_listing()
+     */
+    public function search($searchtext, $page = 0) {
+        if (empty($searchtext)) {
+            return [];
+        }
+
+        $ret = $this->get_listing_prepare_response('/');
+
+        $this->initiate_webdavclient();
+        if (empty($this->client) || !$this->dav->open()) {
+            return $ret;
+        }
+
+        // Extract the username from the oauth2 client.
+        // It is needed for the webdav search request and subsequent response conversion.
+        $userinfo = $this->client->get_userinfo();
+        $username = $userinfo['username'];
+
+        if (empty($username)) {
+            $this->dav->close();
+            return $ret;
+        }
+
+        // Use native WebDAV search
+        // Manually setting the dav entpoint different to the one from the nextcloud issuer.
+        // The origianle davendpoint /remote.php/webdav does not support SEARCH.
+        $searchdavpath = '/remote.php/dav/';
+        $results = $this->dav->search($searchdavpath, $username, $searchtext);
+
+        if (is_array($results)) {
+            // Convert WebDAV results to Moodle repository format
+            // Parameter endpointurl for proper href parsing, since they have a different
+            // base urls in the search request response, which includes the username.
+            $ret['list'] = $this->get_listing_convert_response('/', $results, $searchdavpath . 'files/' . $username);
+        }
+
+        $this->dav->close();
+        return $ret;
+    }
+
+    /**
      * Deletes the held Access Token and prints the Login window.
      *
      * @return array login window properties.
@@ -785,13 +831,17 @@ class repository_nextcloud extends repository {
      *
      * @param string $dirpath Relative (urlencoded) path of the folder of interest.
      * @param array $ls Output by WebDAV
+     * @param string $endpointurl Optional different endpoint URL to use for href parsing.
      * @return array Moodle-formatted list of directory contents; ready for use as $ret['list'] in get_listings
      */
-    private function get_listing_convert_response($dirpath, $ls) {
+    private function get_listing_convert_response($dirpath, $ls, $endpointurl = '') {
         global $OUTPUT;
         $folders = array();
         $files = array();
         $parsedurl = issuer_management::parse_endpoint_url('webdav', $this->issuer);
+        if (!empty($endpointurl)) {
+            $parsedurl['path'] = $endpointurl;
+        }
         $basepath = rtrim('/' . ltrim($parsedurl['path'], '/ '), '/ ');
 
         foreach ($ls as $item) {
@@ -878,7 +928,7 @@ class repository_nextcloud extends repository {
         $ret = [
             // Fetch the list dynamically. An AJAX request is sent to the server as soon as the user opens a folder.
             'dynload' => true,
-            'nosearch' => true, // Disable search.
+            'nosearch' => false, // Enable search.
             'nologin' => false, // Provide a login link because a user logs into his/her private Nextcloud storage.
             'path' => array([ // Contains all parent paths to the current path.
                 'name' => $this->get_meta()->name,

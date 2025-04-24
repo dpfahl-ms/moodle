@@ -792,6 +792,123 @@ class webdav_client {
     }
 
     /**
+     * Search for files using WebDAV method.
+     * Implements the WebDAV SEARCH extension (RFC 5323).
+     *
+     * @param string $path Request path for the dav path
+     * @param string $username Username from the repoistory user in the nextcloud
+     * @param string $query Search query
+     * @param array $properties Optional array of DAV properties to return
+     * @return array|bool Array of matching files/folders or false on error
+     */
+    public function search($path, $username, $query, $properties = []) {
+        if (trim($path) == '') {
+            $this->_error_log('Missing a path in method search');
+            return false;
+        }
+
+        $this->_path = $this->translate_uri($path);
+
+        // Needed for the search request href value.
+        // Only search in the users base path.
+        $userpath = '/files/' . $username . '/';
+
+        $this->header_unset();
+        $this->create_basic_request('SEARCH');
+        $this->header_add('Content-type: text/xml');
+
+        // Default properties if none specified.
+        if (empty($properties)) {
+            $properties = [
+                'displayname',
+                'getcontentlength',
+                'getlastmodified',
+                'resourcetype',
+            ];
+        }
+        // Build the SEARCH request XML.
+        $xml = '<?xml version="1.0" encoding="utf-8" ?>' . "\r\n";
+        $xml .= '<d:searchrequest xmlns:d="DAV:">' . "\r\n";
+        $xml .= '  <d:basicsearch>' . "\r\n";
+        $xml .= '    <d:select>' . "\r\n";
+        $xml .= '      <d:prop>' . "\r\n";
+        foreach ($properties as $prop) {
+            $xml .= '        <d:' . basename($prop) . '/>' . "\r\n";
+        }
+        $xml .= '      </d:prop>' . "\r\n";
+        $xml .= '    </d:select>' . "\r\n";
+        $xml .= '    <d:from>' . "\r\n";
+        $xml .= '      <d:scope>' . "\r\n";
+        $xml .= '        <d:href>' . $userpath . '</d:href>' . "\r\n";
+        $xml .= '        <d:depth>infinity</d:depth>' . "\r\n";
+        $xml .= '      </d:scope>' . "\r\n";
+        $xml .= '    </d:from>' . "\r\n";
+        $xml .= '    <d:where>' . "\r\n";
+        $xml .= '      <d:like>' . "\r\n";
+        $xml .= '        <d:prop><d:displayname/></d:prop>' . "\r\n";
+        $xml .= '        <d:literal>%' . $query . '%</d:literal>' . "\r\n";
+        $xml .= '      </d:like>' . "\r\n";
+        $xml .= '    </d:where>' . "\r\n";
+        $xml .= '    <d:orderby/>' . "\r\n";
+        $xml .= '  </d:basicsearch>' . "\r\n";
+        $xml .= '</d:searchrequest>' . "\r\n";
+
+        $this->header_add('Content-length: ' . strlen($xml));
+        $this->send_request();
+        $this->_error_log($xml);
+        fputs($this->sock, $xml);
+        $this->get_respond();
+        $response = $this->process_respond();
+
+        // Parsing of the response is taking place in the same way as in the ls() implemantaion.
+        // Check http-version.
+        if (
+            $response['status']['http-version'] == 'HTTP/1.1' ||
+            $response['status']['http-version'] == 'HTTP/1.0'
+            ) {
+            // We expect a 207 Multi-Status status code.
+            if (strcmp($response['status']['status-code'], '207') == 0 ) {
+                // Next there should be a Content-Type: text/xml; charset="utf-8" header line.
+                if (preg_match('#(application|text)/xml;\s?charset=[\'\"]?utf-8[\'\"]?#i', $response['header']['Content-Type'])) {
+                    // Ok let's get the content of the xml stuff.
+                    $this->_parser = xml_parser_create_ns('UTF-8');
+                    $this->_parserid = $this->get_parser_id($this->_parser);
+                    // Forget old data.
+                    unset($this->_ls[$this->_parserid]);
+                    unset($this->_xmltree[$this->_parserid]);
+                    xml_parser_set_option($this->_parser, XML_OPTION_SKIP_WHITE, 0);
+                    xml_parser_set_option($this->_parser, XML_OPTION_CASE_FOLDING, 0);
+                    xml_set_element_handler($this->_parser, [$this, "_propfind_startElement"], [$this, "_endElement"]);
+                    xml_set_character_data_handler($this->_parser, [$this, "_propfind_cdata"]);
+
+                    if (!xml_parse($this->_parser, $response['body'])) {
+                        die(sprintf("XML error: %s at line %d",
+                            xml_error_string(xml_get_error_code($this->_parser)),
+                            xml_get_current_line_number($this->_parser)));
+                    }
+
+                    // Free resources.
+                    xml_parser_free($this->_parser);
+                    $arr = $this->_ls[$this->_parserid];
+                    return $arr;
+                } else {
+                    $this->_error_log('Missing Content-Type: text/xml header in response!!');
+                    return false;
+                }
+            } else {
+                // Return status code.
+                return $response['status']['status-code'];
+            }
+        }
+
+        // Response was not http.
+        $this->_error_log('Ups in method search: error in response from server');
+
+        return false;
+    }
+
+
+    /**
      * Public method ls
      *
      * Get's directory information from webdav server into flat a array using PROPFIND
