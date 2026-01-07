@@ -378,4 +378,5 @@ $legacyclasses = [
         'core_courseformat',
         'output/local/content/activitychooserbutton.php',
     ],
+    \curl::class => 'files/curl.php',
 ];
