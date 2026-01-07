@@ -322,4 +322,5 @@ $legacyclasses = [
         'core_filters',
         'form/local_settings_form.php',
     ],
+    \curl::class => 'files/curl.php',
 ];
